@@ -20,6 +20,19 @@ import tempfile
 import openpyxl
 import formulas
 
+def read_excel_as_dataframe(file_path: str, sheet_name: str) -> pd.DataFrame:
+    """
+    Excelをdata_only=Trueで読み込み、数式は計算済み値を取得。
+    """
+    wb = load_workbook(file_path, data_only=True)
+    if sheet_name not in wb.sheetnames:
+        raise ValueError(f"シートが見つかりません: {sheet_name}")
+
+    ws = wb[sheet_name]
+    data = ws.values
+    df = pd.DataFrame(data)
+    return df
+
 def _read_excel_values_as_df(file_path: str, sheet_name: str) -> pd.DataFrame:
     """Excelシートを DataFrame 化して返す（数式セルは“計算結果”を値として取得）。
 
@@ -127,15 +140,14 @@ def build_html(file_path: str, sheet_name: str = DEFAULT_SHEET_NAME, title: str 
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Excelファイルが見つかりません: {file_path}")
+    df_raw = read_excel_as_dataframe(file_path, sheet_name)
 
-    df_raw = _read_excel_values_as_df(file_path, sheet_name)
+    # ヘッダー情報
+    header_info_period = str(df_raw.iloc[4, 1]) if not pd.isna(df_raw.iloc[4, 1]) else ""
+    header_info_unit = str(df_raw.iloc[5, 2]) if not pd.isna(df_raw.iloc[5, 2]) else ""
 
-    # B5, C6 をメタ情報として取得（元スクリプト踏襲）
-    header_info_period = df_raw.iloc[4, 1]
-    header_info_unit = df_raw.iloc[5, 2]
-
-    # 7行目(index 6) 〜 51行目(index 50)、B列(1)とC列(2)
-    df = df_raw.iloc[6:51, [1, 2]].fillna("")
+    # テーブル用データ
+    df = df_raw.iloc[6:51, [1, 2]].fillna('')
 
     custom_css = """
     <style>
