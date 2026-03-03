@@ -4,11 +4,25 @@ import os
 from pathlib import Path
 
 import pandas as pd
+from openpyxl import load_workbook
+
 
 DEFAULT_FILE_PATH = "/content/CF付財務分析表（経営指標あり）_ReadingData_updated.xlsx"
 DEFAULT_SHEET_NAME = "CF計算書"
 DEFAULT_TITLE = "キャッシュ・フロー計算書"
 
+
+
+def _read_excel_values_as_df(file_path: str, sheet_name: str) -> pd.DataFrame:
+    """Excelの数式セルでも「計算結果（キャッシュ値）」を値として取得する。
+    ※ Excel側で計算済みで保存されている必要があります（未計算だとNoneになります）
+    """
+    wb = load_workbook(file_path, data_only=True, read_only=True)
+    if sheet_name not in wb.sheetnames:
+        raise ValueError(f"シートが見つかりません: {sheet_name}")
+    ws = wb[sheet_name]
+    data = [list(r) for r in ws.iter_rows(values_only=True)]
+    return pd.DataFrame(data)
 
 def build_html(file_path: str, sheet_name: str = DEFAULT_SHEET_NAME, title: str = DEFAULT_TITLE) -> str:
     """
@@ -18,7 +32,7 @@ def build_html(file_path: str, sheet_name: str = DEFAULT_SHEET_NAME, title: str 
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Excelファイルが見つかりません: {file_path}")
 
-    df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+    df_raw = _read_excel_values_as_df(file_path, sheet_name)
 
     # B5, C6 をメタ情報として取得（元スクリプト踏襲）
     header_info_period = df_raw.iloc[4, 1]
