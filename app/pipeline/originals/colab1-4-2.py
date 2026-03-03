@@ -4,8 +4,11 @@ import os
 from pathlib import Path
 
 import pandas as pd
-from openpyxl import load_workbook
 
+import tempfile
+import openpyxl
+import formulas
+from openpyxl import load_workbook
 
 DEFAULT_FILE_PATH = "/content/CF付財務分析表（経営指標あり）_ReadingData_updated.xlsx"
 DEFAULT_SHEET_NAME = "CF計算書②"
@@ -13,16 +16,109 @@ DEFAULT_TITLE = "キャッシュ・フロー計算書②"
 
 
 
+import tempfile
+import openpyxl
+import formulas
+
 def _read_excel_values_as_df(file_path: str, sheet_name: str) -> pd.DataFrame:
-    """Excelの数式セルでも「計算結果（キャッシュ値）」を値として取得する。
-    ※ Excel側で計算済みで保存されている必要があります（未計算だとNoneになります）
+    """Excelシートを DataFrame 化して返す（数式セルは“計算結果”を値として取得）。
+
+    優先順位:
+      1) data_only=True で取得できる「保存済みキャッシュ値」
+      2) キャッシュが無い/空のときは、Pythonの式評価エンジン（formulas）で計算して取得
+
+    注意:
+      - ②の計算は多少コストがかかります（ただしExcel本体は不要）。
     """
-    wb = load_workbook(file_path, data_only=True, read_only=True)
-    if sheet_name not in wb.sheetnames:
+    # まずはキャッシュ値で読む（速い）
+    wb_values = load_workbook(file_path, data_only=True, read_only=True)
+    if sheet_name not in wb_values.sheetnames:
         raise ValueError(f"シートが見つかりません: {sheet_name}")
-    ws = wb[sheet_name]
-    data = [list(r) for r in ws.iter_rows(values_only=True)]
-    return pd.DataFrame(data)
+    ws_values = wb_values[sheet_name]
+    data = [list(r) for r in ws_values.iter_rows(values_only=True)]
+    df = pd.DataFrame(data)
+
+    # キャッシュが無い数式が含まれていそうなら formulas で計算して埋める
+    # （本スクリプトは先頭〜50行程度しか使わないため、そこだけ判定）
+    wb_formula = load_workbook(file_path, data_only=False, read_only=True)
+    ws_formula = wb_formula[sheet_name]
+
+    need_calc = False
+    max_r = min(ws_formula.max_row or 0, 60)
+    max_c = min(ws_formula.max_column or 0, 10)
+
+    for r in range(1, max_r + 1):
+        for c in range(1, max_c + 1):
+            cell = ws_formula.cell(row=r, column=c)
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                try:
+                    v = df.iat[r - 1, c - 1]
+                except Exception:
+                    v = None
+                if v is None or v == "":
+                    need_calc = True
+                    break
+        if need_calc:
+            break
+
+    if not need_calc:
+        return df
+
+    # --- formulas で計算（シート名の参照を 'シート名'! 形式へ補正してから読む） ---
+    # ※ formulas のパーサが非ASCIIシート名の未クオート参照を扱えないケースがあるため
+    wb_edit = load_workbook(file_path, data_only=False)
+    sheetnames = sorted(wb_edit.sheetnames, key=len, reverse=True)
+    for ws in wb_edit.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                v = cell.value
+                if isinstance(v, str) and v.startswith("="):
+                    new_v = v
+                    for s in sheetnames:
+                        if f"'{s}'!" in new_v:
+                            continue
+                        if f"{s}!" in new_v:
+                            new_v = new_v.replace(f"{s}!", f"'{s}'!")
+                    if new_v != v:
+                        cell.value = new_v
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tf:
+        tmp_path = tf.name
+    try:
+        wb_edit.save(tmp_path)
+
+        model = formulas.ExcelModel().loads(tmp_path).finish()
+        sol = model.calculate()
+
+        book = os.path.basename(tmp_path)
+        # sol のキーは "'[book]Sheet'!A1" 形式
+        # DataFrame全体を計算結果で組み立て（最大範囲はシートのmax_row/max_column）
+        ws = wb_edit[sheet_name]
+        max_row = ws.max_row or 0
+        max_col = ws.max_column or 0
+
+        out = [[None for _ in range(max_col)] for _ in range(max_row)]
+        for r in range(1, max_row + 1):
+            for c in range(1, max_col + 1):
+                coord = openpyxl.utils.get_column_letter(c) + str(r)
+                key = f"'[{book}]{sheet_name}'!{coord}"
+                rng = sol.get(key)
+                if rng is not None:
+                    val = rng.value
+                    # 1セルは array([[x]]) なので取り出す
+                    try:
+                        out[r - 1][c - 1] = val[0][0]
+                    except Exception:
+                        out[r - 1][c - 1] = val
+                else:
+                    out[r - 1][c - 1] = ws.cell(row=r, column=c).value
+
+        return pd.DataFrame(out)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
 
 def build_html(file_path: str, sheet_name: str = DEFAULT_SHEET_NAME, title: str = DEFAULT_TITLE) -> str:
     """
